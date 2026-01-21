@@ -85,6 +85,8 @@ bool threadpool<T>::append(T *request) {
 
 template <typename T>
 void *threadpool<T>::worker(void *arg) {
+    // 此时 arg 就是那个 this 指针，但它是 void* 类型的（万能指针）
+    // 我们把它强转回 threadpool* 类型
     threadpool *pool = (threadpool *)arg;
     pool->run(); // 真正干活的函数
     return pool;

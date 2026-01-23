@@ -309,12 +309,7 @@ http_conn::HTTP_CODE http_conn::process_read() {
     return NO_REQUEST;
 }
 
-// 占位函数：当得到一个完整请求时，我们需要处理它 (比如找文件)
-// 我们明天再实现这个
-http_conn::HTTP_CODE http_conn::do_request() {
-    // 暂时先返回成功，明天写逻辑
-    return FILE_REQUEST;
-}
+
 
 
 

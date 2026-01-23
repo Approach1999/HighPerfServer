@@ -316,22 +316,225 @@ http_conn::HTTP_CODE http_conn::do_request() {
     return FILE_REQUEST;
 }
 
-// 线程池的工作入口
-void http_conn::process() {
-    // 1. 解析 HTTP 请求
-    HTTP_CODE read_ret = process_read();
+
+
+// 得到一个完整的、正确的 HTTP 请求时，我们就分析目标文件的属性
+// 如果目标文件存在、对所有用户可读，且不是目录，则使用 mmap 将其映射到内存地址 m_file_address 处
+http_conn::HTTP_CODE http_conn::do_request() {
+    // m_real_file 之前初始化过，是网站根目录
+    strcpy(m_real_file, doc_root);
+    int len = strlen(doc_root);
     
-    // 如果请求不完整，继续监听读事件 (ONESHOT 重置)
+    // 拼接路径：/home/jasper/.../resources + /index.html
+    strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
+    
+    // stat 获取文件属性
+    if (stat(m_real_file, &m_file_stat) < 0) {
+        return NO_RESOURCE; // 404
+    }
+
+    // 判断权限：是否可读
+    if (!(m_file_stat.st_mode & S_IROTH)) {
+        return FORBIDDEN_REQUEST; // 403
+    }
+
+    // 判断是不是目录
+    if (S_ISDIR(m_file_stat.st_mode)) {
+        return BAD_REQUEST;
+    }
+
+    // 打开文件
+    int fd = open(m_real_file, O_RDONLY);
+    
+    // ============================================
+    // 核心大招：mmap
+    // ============================================
+    // 这里的 MAP_PRIVATE 表示私有映射，PROT_READ 表示只读
+    m_file_address = (char *)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    
+    close(fd); // 映射完就可以关掉文件描述符了，不影响内存里的映射
+    return FILE_REQUEST;
+}
+
+// 释放内存映射
+void http_conn::unmap() {
+    if (m_file_address) {
+        munmap(m_file_address, m_file_stat.st_size);
+        m_file_address = 0;
+    }
+}
+
+// 非阻塞写：将响应头和文件内容一次性发出去
+bool http_conn::write() {
+    int temp = 0;
+    int bytes_have_send = 0; // 已经发送的字节数
+    // m_write_idx 是响应头的长度
+    // m_file_stat.st_size 是文件长度
+    int bytes_to_send = m_write_idx + m_content_length; 
+
+    if (bytes_to_send == 0) {
+        // 没什么要发的，重置一下等待下次
+        modfd(m_epollfd, m_sockfd, EPOLLIN);
+        init();
+        return true;
+    }
+
+    while (1) {
+        // writev 分散写：同时发送 m_iv[0] 和 m_iv[1]
+        temp = writev(m_sockfd, m_iv, m_iv_count);
+        
+        if (temp <= -1) {
+            // 如果 TCP 写缓冲满了，那就等待下一轮 EPOLLOUT 事件
+            if (errno == EAGAIN) {
+                // 这一步非常重要：因为我们没写完，必须记录已经写了多少
+                // 下次进来要接着写，否则会发重复数据或乱码
+                // (为了简化教程，这里省略了断点续传的复杂逻辑，实际项目中需要调整 iovec 的指针)
+                // 这里简单处理：只要满了就重置 EPOLLOUT 等待下次
+                modfd(m_epollfd, m_sockfd, EPOLLOUT);
+                return true;
+            }
+            // 发送失败
+            unmap();
+            return false;
+        }
+
+        bytes_to_send -= temp;
+        bytes_have_send += temp;
+
+        // 数据全发完了
+        if (bytes_to_send <= 0) {
+            unmap(); // 解除文件映射
+            
+            // 如果是长连接 (Keep-Alive)
+            if (m_linger) {
+                init(); // 重置内部变量，准备接收下个请求
+                modfd(m_epollfd, m_sockfd, EPOLLIN); // 继续监听读
+                return true;
+            } else {
+                modfd(m_epollfd, m_sockfd, EPOLLIN);
+                return false; // 返回 false 让上层关闭连接
+            }
+        }
+    }
+}
+
+// 往写缓冲区里写入数据 (类似 printf)
+bool http_conn::add_response(const char *format, ...) {
+    if (m_write_idx >= WRITE_BUFFER_SIZE) return false;
+    
+    va_list arg_list;
+    va_start(arg_list, format);
+    // vsnprintf: 安全地把变参格式化进 buffer
+    int len = vsnprintf(m_write_buf + m_write_idx, WRITE_BUFFER_SIZE - 1 - m_write_idx, format, arg_list);
+    
+    if (len >= (WRITE_BUFFER_SIZE - 1 - m_write_idx)) {
+        return false;
+    }
+    m_write_idx += len;
+    va_end(arg_list);
+    return true;
+}
+
+bool http_conn::add_status_line(int status, const char *title) {
+    return add_response("%s %d %s\r\n", "HTTP/1.1", status, title);
+}
+
+bool http_conn::add_headers(int content_len) {
+    add_content_length(content_len);
+    add_linger();
+    add_blank_line();
+    return true;
+}
+
+bool http_conn::add_content_length(int content_len) {
+    return add_response("Content-Length: %d\r\n", content_len);
+}
+
+bool http_conn::add_linger() {
+    return add_response("Connection: %s\r\n", (m_linger == true) ? "keep-alive" : "close");
+}
+
+bool http_conn::add_blank_line() {
+    return add_response("%s", "\r\n");
+}
+
+bool http_conn::add_content(const char *content) {
+    return add_response("%s", content);
+}
+
+// 根据 do_request 的结果，生成对应的 HTTP 响应
+bool http_conn::process_write(HTTP_CODE ret) {
+    switch (ret) {
+        case INTERNAL_ERROR:
+            add_status_line(500, error_500_title);
+            add_headers(strlen(error_500_form));
+            if (!add_content(error_500_form)) return false;
+            break;
+        case BAD_REQUEST:
+            add_status_line(400, error_400_title);
+            add_headers(strlen(error_400_form));
+            if (!add_content(error_400_form)) return false;
+            break;
+        case NO_RESOURCE: // 404
+            add_status_line(404, error_404_title);
+            add_headers(strlen(error_404_form));
+            if (!add_content(error_404_form)) return false;
+            break;
+        case FORBIDDEN_REQUEST:
+            add_status_line(403, error_403_title);
+            add_headers(strlen(error_403_form));
+            if (!add_content(error_403_form)) return false;
+            break;
+        case FILE_REQUEST: // 成功找到文件
+            add_status_line(200, ok_200_title);
+            if (m_file_stat.st_size != 0) {
+                // 1. 写 Header
+                add_headers(m_file_stat.st_size);
+                
+                // 2. 准备 iovec
+                // 第一块内存：Header (m_write_buf)
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                
+                // 第二块内存：File (mmap的地址)
+                m_iv[1].iov_base = m_file_address;
+                m_iv[1].iov_len = m_file_stat.st_size;
+                
+                m_iv_count = 2;
+                
+                // 此时，response 已经准备好，等待 write() 函数被调用
+                // 但我们还需要更新一下 content_length 用于 write 里的计数
+                m_content_length = m_file_stat.st_size; 
+                
+                return true;
+            } else {
+                const char *ok_string = "<html><body></body></html>";
+                add_headers(strlen(ok_string));
+                if (!add_content(ok_string)) return false;
+            }
+    }
+    
+    // 如果不是 FILE_REQUEST，就只需要发 Header + 错误信息，不需要发文件
+    m_iv[0].iov_base = m_write_buf;
+    m_iv[0].iov_len = m_write_idx;
+    m_iv_count = 1;
+    m_content_length = 0; // 这里的逻辑稍微简化了，实际错误信息在buffer里
+    return true;
+}
+
+void http_conn::process() {
+    HTTP_CODE read_ret = process_read();
     if (read_ret == NO_REQUEST) {
         modfd(m_epollfd, m_sockfd, EPOLLIN);
         return;
     }
     
-    // 2. 生成响应 (写操作，我们下次课实现)
-    // TODO
-    // bool write_ret = process_write(read_ret);
-    // if (!write_ret) {
-    //     close_conn();
-    // }
-    // modfd(m_epollfd, m_sockfd, EPOLLOUT);
+    // 生成响应
+    bool write_ret = process_write(read_ret);
+    if (!write_ret) {
+        close_conn();
+    }
+    // 注册写事件：告诉 Epoll，我准备好写数据了，等 socket 可写的时候通知我
+    modfd(m_epollfd, m_sockfd, EPOLLOUT);
 }
+

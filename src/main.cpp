@@ -14,6 +14,7 @@
 #include "threadpool.h"
 #include "http_conn.h"
 #include "config.h" 
+#include "sql_conn_pool.h"
 
 #define MAX_FD 65536           // 最大文件描述符个数
 #define MAX_EVENT_NUMBER 10000 // 一次监听的最大事件数量
@@ -70,6 +71,13 @@ int main(int argc, char *argv[]) {
     // 如果客户端关了，服务器还往里写数据，会触发 SIGPIPE，默认行为是终止进程
     // 我们要忽略它，保证服务器不挂
     addsig(SIGPIPE, SIG_IGN);
+
+    // 2. 【新增】初始化数据库连接池
+    // 使用单例模式获取实例
+    connection_pool *connPool = connection_pool::GetInstance();
+    
+    // 假设配置里没有 DB_MAX_CONN，我们暂时硬编码为 8，或者你去 config 加一个
+    connPool->init(config.DB_HOST, config.DB_USER, config.DB_PASS, config.DB_NAME, config.DB_PORT, 8);
 
     // 创建线程池 (使用配置里的线程数)
     threadpool<http_conn> *pool = new threadpool<http_conn>(config.THREAD_NUM);

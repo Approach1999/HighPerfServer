@@ -19,6 +19,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/uio.h>
+#include <string>   
 #include "locker.h"
 
 class http_conn {
@@ -99,6 +100,7 @@ private:
     HTTP_CODE do_request();
     char *get_line() { return m_read_buf + m_start_line; }
     LINE_STATUS parse_line();
+    bool check_login(const std::string& username, const std::string& password);
 
     // 这一组函数被 process_write 调用以填充 HTTP 响应
     void unmap();

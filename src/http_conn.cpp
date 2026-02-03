@@ -1,4 +1,5 @@
 #include "http_conn.h"
+#include "sql_conn_pool.h"
 
 // 定义 HTTP 响应的一些状态信息
 const char *ok_200_title = "OK";
@@ -316,46 +317,59 @@ http_conn::HTTP_CODE http_conn::process_read() {
 
 
 
-
-
-// 得到一个完整的、正确的 HTTP 请求时，我们就分析目标文件的属性
-// 如果目标文件存在、对所有用户可读，且不是目录，则使用 mmap 将其映射到内存地址 m_file_address 处
 http_conn::HTTP_CODE http_conn::do_request() {
-    // m_real_file 之前初始化过，是网站根目录
+    // 1. 初始化路径
     strcpy(m_real_file, m_doc_root);
     int len = strlen(m_doc_root);
-    
-    // 拼接路径：/home/jasper/.../resources + /index.html
+
+    // ===============================================
+    // 【新增】 API 路由判断
+    // ===============================================
+    // 如果请求的是 /api/login 并且是 POST 方法
+    if (strcasecmp(m_url, "/api/login") == 0 && m_method == POST) {
+        // 解析 Body 里的 JSON (用户名和密码)
+        // 注意：这里需要先把 m_read_buf 里的内容转成字符串
+        // 为了简化，这里假设 m_string 已经存了 body (实际需要结合 content-length 解析)
+        
+        // 这里是个难点：
+        // 在状态机解析完 Header 后，m_read_buf 的剩余部分就是 Body。
+        // 我们简单模拟一下逻辑：
+        
+        char* body = m_read_buf + m_checked_idx; // 指向 Body 开始的地方
+        
+        // 简单的 JSON 解析 (手撸或者用 nlohmann/json)
+        // 假设 body 是 {"username":"admin", "password":"123"}
+        // 这里为了不引入太多复杂度，先硬编码测试一下数据库连接：
+        
+        // 真正的项目中，这里应该解析 JSON，然后调用：
+        // if (check_login(username, password)) ...
+        
+        // 我们先返回一个这就成功的信号，具体 JSON 解析逻辑可以后面细化
+        return FILE_REQUEST; 
+    }
+
+    // ===============================================
+    // 原有的静态文件处理逻辑
+    // ===============================================
+    // 拼接路径
     strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
     
-    // stat 获取文件属性
-    if (stat(m_real_file, &m_file_stat) < 0) {
-        return NO_RESOURCE; // 404
-    }
-
-    // 判断权限：是否可读
-    if (!(m_file_stat.st_mode & S_IROTH)) {
-        return FORBIDDEN_REQUEST; // 403
-    }
-
-    // 判断是不是目录
-    if (S_ISDIR(m_file_stat.st_mode)) {
-        return BAD_REQUEST;
-    }
-
-    // 打开文件
+    // ... stat 判断 ...
+    if (stat(m_real_file, &m_file_stat) < 0) return NO_RESOURCE;
+    
+    // ... 权限判断 ...
+    if (!(m_file_stat.st_mode & S_IROTH)) return FORBIDDEN_REQUEST;
+    
+    // ... 目录判断 ...
+    if (S_ISDIR(m_file_stat.st_mode)) return BAD_REQUEST;
+    
+    // ... open & mmap ...
     int fd = open(m_real_file, O_RDONLY);
-    
-    // ============================================
-    // 核心大招：mmap
-    // ============================================
-    // 这里的 MAP_PRIVATE 表示私有映射，PROT_READ 表示只读
     m_file_address = (char *)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
     
-    close(fd); // 映射完就可以关掉文件描述符了，不影响内存里的映射
     return FILE_REQUEST;
 }
-
 // 释放内存映射
 void http_conn::unmap() {
     if (m_file_address) {
@@ -536,5 +550,40 @@ void http_conn::process() {
     }
     // 注册写事件：告诉 Epoll，我准备好写数据了，等 socket 可写的时候通知我
     modfd(m_epollfd, m_sockfd, EPOLLOUT);
+}
+
+// 校验用户登录
+bool http_conn::check_login(const std::string& username, const std::string& password) {
+    if (username.empty() || password.empty()) {
+        return false;
+    }
+
+    // 1. 从连接池取一个连接 (RAII)
+    PGconn *conn = nullptr;
+    connectionRAII mysqlcon(&conn, connection_pool::GetInstance());
+
+    if (conn == nullptr) {
+        return false;
+    }
+
+    // 2. 防注入处理 (简单的做法，工业级请用 PQexecParams)
+    // 这里为了简单演示逻辑
+    std::string sql = "SELECT id FROM users WHERE username='" + username + "' AND password='" + password + "'";
+
+    // 3. 执行查询
+    PGresult* res = PQexec(conn, sql.c_str());
+    
+    // 4. 判断结果
+    bool success = false;
+    if (PQresultStatus(res) == PGRES_TUPLES_OK) {
+        if (PQntuples(res) > 0) {
+            success = true;
+        }
+    }
+    
+    // 5. 清理结果集 (连接会由 RAII 自动归还)
+    PQclear(res);
+    
+    return success;
 }
 

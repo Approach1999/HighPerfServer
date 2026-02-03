@@ -13,6 +13,7 @@
 #include "locker.h"
 #include "threadpool.h"
 #include "http_conn.h"
+#include "config.h" 
 
 #define MAX_FD 65536           // 最大文件描述符个数
 #define MAX_EVENT_NUMBER 10000 // 一次监听的最大事件数量
@@ -38,19 +39,40 @@ void show_error(int connfd, const char *info) {
 }
 
 int main(int argc, char *argv[]) {
-    // 默认端口 8080，也可以通过命令行参数传递
-    int port = 8080;
-    if (argc > 1) {
-        port = atoi(argv[1]);
-    }
+    // 1. 加载配置
+    Config config;
+    config.parse_file("server.conf"); // 读取同目录下的 server.conf
 
-    // 1. 忽略 SIGPIPE 信号
+    int port = config.PORT;
+    
+    // 2. 配置 http_conn 的静态成员
+    // 注意：这里需要申请内存或者直接指向 config 的 string
+    // 为了简单，我们这里用 strdup (需要手动 free，或者让 OS 回收)
+    http_conn::m_doc_root = strdup(config.DOC_ROOT.c_str());
+    
+    // 拼接 PG 数据库连接串
+    // 格式：host=127.0.0.1 port=5432 dbname=cpp_db user=cpp_user password=123456
+    std::string conninfo = "host=" + config.DB_HOST + 
+                           " port=" + std::to_string(config.DB_PORT) +
+                           " dbname=" + config.DB_NAME +
+                           " user=" + config.DB_USER +
+                           " password=" + config.DB_PASS;
+    
+    // 这里的 m_db_url 在 http_conn.h 里定义，你需要去加上
+    // 暂时我们可以先只修改 check_login 里用的连接串，或者用全局变量
+    // 这里演示注入 doc_root 已经足够说明解耦的思想了
+    
+    printf("服务器配置加载完毕：\n");
+    printf("端口: %d\n", port);
+    printf("根目录: %s\n", http_conn::m_doc_root);
+
+    //  忽略 SIGPIPE 信号
     // 如果客户端关了，服务器还往里写数据，会触发 SIGPIPE，默认行为是终止进程
     // 我们要忽略它，保证服务器不挂
     addsig(SIGPIPE, SIG_IGN);
 
-    // 2. 创建线程池
-    threadpool<http_conn> *pool = NULL;
+    // 创建线程池 (使用配置里的线程数)
+    threadpool<http_conn> *pool = new threadpool<http_conn>(config.THREAD_NUM);
     try {
         pool = new threadpool<http_conn>;
     } catch (...) {

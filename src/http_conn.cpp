@@ -11,8 +11,13 @@ const char *error_404_form = "The requested file was not found on this server.\n
 const char *error_500_title = "Internal Error";
 const char *error_500_form = "There was an unusual problem serving the requested file.\n";
 
-// 网站根目录
-const char *doc_root = "/home/jasper/HighPerfServer/resources";
+// 初始化静态变量
+char* http_conn::m_doc_root = nullptr;
+char* http_conn::m_db_url = nullptr; // 比如 "host=... port=..."
+char* http_conn::m_db_user = nullptr;
+char* http_conn::m_db_password = nullptr;
+char* http_conn::m_db_name = nullptr;
+
 
 // 设置非阻塞
 int http_conn::setnonblocking(int fd) {
@@ -317,8 +322,8 @@ http_conn::HTTP_CODE http_conn::process_read() {
 // 如果目标文件存在、对所有用户可读，且不是目录，则使用 mmap 将其映射到内存地址 m_file_address 处
 http_conn::HTTP_CODE http_conn::do_request() {
     // m_real_file 之前初始化过，是网站根目录
-    strcpy(m_real_file, doc_root);
-    int len = strlen(doc_root);
+    strcpy(m_real_file, m_doc_root);
+    int len = strlen(m_doc_root);
     
     // 拼接路径：/home/jasper/.../resources + /index.html
     strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);

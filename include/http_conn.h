@@ -116,6 +116,13 @@ public:
     static const int READ_BUFFER_SIZE = 2048;  // 读缓冲区大小
     static const int WRITE_BUFFER_SIZE = 1024; // 写缓冲区大小
 
+
+    static char* m_doc_root;      // 网站根目录
+    static char* m_db_url;        // 数据库连接串
+    static char* m_db_user;
+    static char* m_db_password;
+    static char* m_db_name;
+
 private:
     int m_sockfd;           // 该 HTTP 连接的 socket
     sockaddr_in m_address;  // 该 HTTP 连接的对方的 socket 地址

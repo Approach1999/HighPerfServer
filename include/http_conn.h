@@ -19,20 +19,22 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/uio.h>
-#include <string>   
+#include <string>
 #include "locker.h"
+#include "memory_pool.h"
 
-class http_conn {
+class http_conn
+{
 public:
     // 设置文件描述符为非阻塞 (ET模式必须)
     static int setnonblocking(int fd);
-    
+
     // 将内核事件表注册读事件，ET模式，选择开启EPOLLONESHOT
     static void addfd(int epollfd, int fd, bool one_shot);
-    
+
     // 从内核时间表删除描述符
     static void removefd(int epollfd, int fd);
-    
+
     // 修改描述符，重置 socket 上的 EPOLLONESHOT 事件，确保下一次可读时，EPOLLIN 再次被触发
     static void modfd(int epollfd, int fd, int ev);
 
@@ -42,17 +44,30 @@ public:
 
 public:
     // HTTP请求方法，这里只支持 GET 和 POST
-    enum METHOD { GET = 0, POST, HEAD, PUT, DELETE, TRACE, OPTIONS, CONNECT, PATCH };
-    
+    enum METHOD
+    {
+        GET = 0,
+        POST,
+        HEAD,
+        PUT,
+        DELETE,
+        TRACE,
+        OPTIONS,
+        CONNECT,
+        PATCH
+    };
+
     // 解析客户端请求时，主状态机所处的状态
-    enum CHECK_STATE { 
+    enum CHECK_STATE
+    {
         CHECK_STATE_REQUESTLINE = 0, // 当前正在分析请求行
         CHECK_STATE_HEADER,          // 当前正在分析头部字段
         CHECK_STATE_CONTENT          // 当前正在分析请求体
     };
-    
+
     // 服务器处理 HTTP 请求的可能结果
-    enum HTTP_CODE { 
+    enum HTTP_CODE
+    {
         NO_REQUEST,        // 请求不完整，需要继续读取客户数据
         GET_REQUEST,       // 获得了一个完整的客户请求
         BAD_REQUEST,       // 客户请求有语法错误
@@ -62,9 +77,14 @@ public:
         INTERNAL_ERROR,    // 500 错误
         CLOSED_CONNECTION  // 客户端关闭连接
     };
-    
+
     // 从状态机的三种可能状态：行读取状态
-    enum LINE_STATUS { LINE_OK = 0, LINE_BAD, LINE_OPEN };
+    enum LINE_STATUS
+    {
+        LINE_OK = 0,
+        LINE_BAD,
+        LINE_OPEN
+    };
 
 public:
     http_conn() {}
@@ -72,26 +92,26 @@ public:
 
     // 初始化新接受的连接
     void init(int sockfd, const sockaddr_in &addr);
-    
+
     // 关闭连接
     void close_conn(bool real_close = true);
-    
+
     // 处理客户请求（这是线程池 worker 调用的入口函数）
     void process();
-    
+
     // 非阻塞读操作
     bool read();
-    
+
     // 非阻塞写操作
     bool write();
 
 private:
     // 初始化连接（内部私有）
     void init();
-    
+
     // --- 下面是 HTTP 解析相关的函数 (TODO) ---
-    HTTP_CODE process_read();           // 解析 HTTP 请求
-    bool process_write(HTTP_CODE ret);  // 填充 HTTP 响应
+    HTTP_CODE process_read();          // 解析 HTTP 请求
+    bool process_write(HTTP_CODE ret); // 填充 HTTP 响应
 
     // 这一组函数被 process_read 调用以分析 HTTP 请求
     HTTP_CODE parse_request_line(char *text);
@@ -100,7 +120,7 @@ private:
     HTTP_CODE do_request();
     char *get_line() { return m_read_buf + m_start_line; }
     LINE_STATUS parse_line();
-    bool check_login(const std::string& username, const std::string& password);
+    bool check_login(const std::string &username, const std::string &password);
 
     // 这一组函数被 process_write 调用以填充 HTTP 响应
     void unmap();
@@ -118,17 +138,16 @@ public:
     static const int READ_BUFFER_SIZE = 2048;  // 读缓冲区大小
     static const int WRITE_BUFFER_SIZE = 1024; // 写缓冲区大小
 
-
-    static char* m_doc_root;      // 网站根目录
-    static char* m_db_url;        // 数据库连接串
-    static char* m_db_user;
-    static char* m_db_password;
-    static char* m_db_name;
+    static char *m_doc_root; // 网站根目录
+    static char *m_db_url;   // 数据库连接串
+    static char *m_db_user;
+    static char *m_db_password;
+    static char *m_db_name;
 
 private:
-    int m_sockfd;           // 该 HTTP 连接的 socket
-    sockaddr_in m_address;  // 该 HTTP 连接的对方的 socket 地址
-    
+    int m_sockfd;          // 该 HTTP 连接的 socket
+    sockaddr_in m_address; // 该 HTTP 连接的对方的 socket 地址
+
     // 读缓冲区
     char m_read_buf[READ_BUFFER_SIZE];
     // 标识读缓冲中已经读入的客户数据的最后一个字节的下一个位置
@@ -165,11 +184,14 @@ private:
     char *m_file_address;
     // 目标文件的状态。通过它我们可以判断文件是否存在、是否为目录、是否可读，并获取文件大小等信息
     struct stat m_file_stat;
-    
+
     // 我们将采用 writev 来执行写操作，所以定义下面两个成员
     // m_iv[0] 存 header，m_iv[1] 存文件内容 (mmap)
     struct iovec m_iv[2];
     int m_iv_count;
+
+    // 内存池指针
+    MemoryPool *m_pool;
 };
 
 #endif
